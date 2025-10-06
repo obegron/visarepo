@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/go-git/go-git/v5"
@@ -51,11 +50,9 @@ type Model struct {
 	graphColumns       int
 	maxAdditions       int
 	maxDeletions       int
-	maxFiles           int
 
 	autoProgress     bool
 	progressInterval time.Duration
-	viewport         viewport.Model
 
 	processedCommitsChan chan *commitInfo
 	loadingComplete      bool
@@ -67,21 +64,15 @@ func (m *Model) SetProgram(p *tea.Program) {
 }
 
 func InitialModel(cfg Config) Model {
-	vp := viewport.New(0, 0)
-	vp.YPosition = 0
-	vp.HighPerformanceRendering = false
-
 	return Model{
 		config:               cfg,
 		currentCommitIndex:   0,
 		autoProgress:         cfg.AutoProgress,
 		progressInterval:     time.Duration(cfg.ProgressIntervalMs) * time.Millisecond,
-		viewport:             vp,
 		networkGraphHeight:   0,
 		graphColumns:         0,
 		maxAdditions:         0,
 		maxDeletions:         0,
-		maxFiles:             0,
 		loadingComplete:      false,
 		processedCommitsChan: make(chan *commitInfo, 100),
 	}
@@ -210,8 +201,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width - 10
 		m.height = msg.Height - 10
-		m.viewport.Width = m.width - 10
-		m.viewport.Height = m.height*2/3 - 10
 		m.graphColumns = m.width/2 - 10
 		m.networkGraphHeight = m.height/3 - 10
 
@@ -220,7 +209,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			select {
 			case newCommit, ok := <-m.processedCommitsChan:
 				if ok {
-					// --- Start of logic moved from newCommitMsg ---
+					// Atomically process the new commit and update the index
 					newCommit.diffLoaded = true
 
 					if len(m.commits) > 0 {
@@ -242,10 +231,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 
 					m.commits = append(m.commits, newCommit)
-
-					// This is the key part for the flicker fix
 					m.currentCommitIndex = len(m.commits) - 1
-					// --- End of logic moved from newCommitMsg ---
+
 				} else {
 					m.loadingComplete = true
 				}
@@ -265,8 +252,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 var (
 	panelStyle         = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("239")).Padding(0, 1)
 	headerStyle        = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("147")).Padding(0, 1).Align(lipgloss.Center)
-	commitHashStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
-	commitMessageStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("251"))
 	statsLabelStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Align(lipgloss.Right).Width(12)
 	statsValueStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("117")).Bold(true).Align(lipgloss.Left).Width(12)
 
@@ -277,12 +262,10 @@ var (
 	barMessageStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("247")).Align(lipgloss.Left)
 	barHighlightStyle = lipgloss.NewStyle().Background(lipgloss.Color("236"))
 
-	additionStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("118")) // Bright green
-	deletionStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("203")) // Bright red
-	graphAxisStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-	sizeGraphStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("220")) // Yellow
-	filesGraphStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("147")) // Purple
-	graphHighlight  = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Bold(true)
+	additionStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("118")) // Bright green
+	deletionStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("203")) // Bright red
+	graphAxisStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	graphHighlight = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Bold(true)
 )
 
 func (m *Model) renderPanelWithHeader(title string, content string, width int, height int) string {
@@ -408,9 +391,9 @@ func (m *Model) renderTimeline(timelineHeight int) string {
 
 	labelWidth := 8
 	statsWidth := 15
-padding := 2
-availableWidth := m.width/2 - 6
-msgWidth := availableWidth - labelWidth - statsWidth - padding
+	padding := 2
+	availableWidth := m.width/2 - 6
+	msgWidth := availableWidth - labelWidth - statsWidth - padding
 	if msgWidth < 20 {
 		msgWidth = 20
 	}
