@@ -413,9 +413,9 @@ func (m *Model) renderTimeline(timelineHeight int) string {
 
 	labelWidth := 8
 	statsWidth := 15
-	padding := 2
-	availableWidth := m.width/2 - 6
-	msgWidth := availableWidth - labelWidth - statsWidth - padding
+padding := 2
+availableWidth := m.width/2 - 6
+msgWidth := availableWidth - labelWidth - statsWidth - padding
 	if msgWidth < 20 {
 		msgWidth = 20
 	}
@@ -541,88 +541,72 @@ func (m *Model) renderLOCGraph(graphHeight int) string {
 }
 
 func (m *Model) renderDeveloperStats() string {
+	// First, get the list of available years for the cycle control
+	yearSet := make(map[int]struct{})
+	for i := 0; i <= m.currentCommitIndex; i++ {
+		yearSet[m.commits[i].date.Year()] = struct{}{}
+	}
+	years := make([]int, 0, len(yearSet))
+	for year := range yearSet {
+		years = append(years, year)
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(years)))
+	m.availableStatYears = append([]int{0}, years...) // 0 for All-Time
+
 	// --- Data Aggregation ---
-	allTimeAuthorChurn := make(map[string]int)
-	yearlyAuthorChurn := make(map[int]map[string]int)
+	// Determine which commits to analyze based on the selected year
+	var commitsToAnalyze []*commitInfo
+	if m.displayedStatsYear == 0 { // All-Time
+		commitsToAnalyze = m.commits[:m.currentCommitIndex+1]
+	} else {
+		for i := 0; i <= m.currentCommitIndex; i++ {
+			if m.commits[i].date.Year() == m.displayedStatsYear {
+				commitsToAnalyze = append(commitsToAnalyze, m.commits[i])
+			}
+		}
+	}
+
+	authorChurn := make(map[string]int)
 	weekdayCounts := make(map[time.Weekday]int)
 	monthCounts := make(map[time.Month]int)
 	hourCounts := make(map[int]int)
 
-	for i := 0; i <= m.currentCommitIndex; i++ {
-		c := m.commits[i]
-		year := c.date.Year()
-
-		// Aggregate all-time stats
-		allTimeAuthorChurn[c.author] += c.churn
+	for _, c := range commitsToAnalyze {
+		authorChurn[c.author] += c.churn
 		weekdayCounts[c.date.Weekday()]++
 		monthCounts[c.date.Month()]++
 		hourCounts[c.date.Local().Hour()]++
-
-		// Aggregate yearly stats
-		if _, ok := yearlyAuthorChurn[year]; !ok {
-			yearlyAuthorChurn[year] = make(map[string]int)
-		}
-		yearlyAuthorChurn[year][c.author] += c.churn
 	}
 
-	// --- Process Stats ---
-
-	// Process all-time top contributors
-	allTimeTopContributors := make([]authorStat, 0, len(allTimeAuthorChurn))
-	for name, churn := range allTimeAuthorChurn {
-		allTimeTopContributors = append(allTimeTopContributors, authorStat{name: name, churn: churn})
+	// Determine top contributors from the analyzed commits
+	topContributors := make([]authorStat, 0, len(authorChurn))
+	for name, churn := range authorChurn {
+		topContributors = append(topContributors, authorStat{name: name, churn: churn})
 	}
-	sort.Slice(allTimeTopContributors, func(i, j int) bool {
-		return allTimeTopContributors[i].churn > allTimeTopContributors[j].churn
+	sort.Slice(topContributors, func(i, j int) bool {
+		return topContributors[i].churn > topContributors[j].churn
 	})
 
-	// Process yearly top contributors
-	yearlyTopContributors := make(map[int][]authorStat)
-	years := make([]int, 0, len(yearlyAuthorChurn))
-	for year := range yearlyAuthorChurn {
-		years = append(years, year)
-	}
-	sort.Sort(sort.Reverse(sort.IntSlice(years)))
-
-	for _, year := range years {
-		churnMap := yearlyAuthorChurn[year]
-		yearList := make([]authorStat, 0, len(churnMap))
-		for name, churn := range churnMap {
-			yearList = append(yearList, authorStat{name: name, churn: churn})
-		}
-		sort.Slice(yearList, func(i, j int) bool {
-			return yearList[i].churn > yearList[j].churn
-		})
-		yearlyTopContributors[year] = yearList
-	}
-
-	// Update available years for cycling: [All-Time, Latest, ..., Oldest]
-	m.availableStatYears = append([]int{0}, years...)
-
-	// --- Determine which stats to display ---
-	var listToShow []authorStat
-	var headerText string
-
-	if m.displayedStatsYear == 0 { // All-Time
-		headerText = "Top 5 (All-Time)"
-		listToShow = allTimeTopContributors
-	} else { // Specific Year
-		headerText = fmt.Sprintf("Top 5 (%d)", m.displayedStatsYear)
-		listToShow = yearlyTopContributors[m.displayedStatsYear]
-	}
-
 	// --- Rendering ---
+	var headerText string
+	if m.displayedStatsYear == 0 {
+		headerText = "Top 5 (All-Time)"
+	} else {
+		headerText = fmt.Sprintf("Top 5 (%d)", m.displayedStatsYear)
+	}
+
 	var b strings.Builder
-	availableWidth := m.width/2 - 8
-	barChartWidth := availableWidth - 20
+
+availableWidth := m.width/2 - 8
+barChartWidth := availableWidth - 20
 	if barChartWidth < 10 {
 		barChartWidth = 10
 	}
 
 	b.WriteString(headerStyle.Render(headerText))
 	b.WriteString("\n")
-	for i := 0; i < len(listToShow) && i < 5; i++ {
-		b.WriteString(fmt.Sprintf(" %-18s %d\n", truncateMessage(listToShow[i].name, 32), listToShow[i].churn))
+	for i := 0; i < len(topContributors) && i < 5; i++ {
+		b.WriteString(fmt.Sprintf(" %-18s %d\n", truncateMessage(topContributors[i].name, 32), topContributors[i].churn))
 	}
 	b.WriteString("\n")
 
