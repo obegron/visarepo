@@ -29,7 +29,7 @@ func loadConfig() (Config, error) {
 		CommitLimit:        -1,
 		RepoPath:           ".",
 		AutoProgress:       false,
-		ProgressIntervalMs: 500, // milliseconds
+		ProgressIntervalMs: 50, // milliseconds
 	}
 
 	configFile, err := os.ReadFile(".visagit.yml")
@@ -162,4 +162,3 @@ func parseFrames(s string) []int {
 	}
 	return frames
 }
-
