@@ -57,6 +57,11 @@ type Model struct {
 	processedCommitsChan chan *commitInfo
 	loadingComplete      bool
 	program              *tea.Program
+
+	// State for developer stats view
+	displayedStatsYear   int // 0 for All-Time, -1 for Latest Year
+	availableStatYears   []int
+	currentStatYearIndex int
 }
 
 func (m *Model) SetProgram(p *tea.Program) {
@@ -75,6 +80,7 @@ func InitialModel(cfg Config) Model {
 		maxDeletions:         0,
 		loadingComplete:      false,
 		processedCommitsChan: make(chan *commitInfo, 100),
+		displayedStatsYear:   -1, // Default to latest year
 	}
 }
 
@@ -194,8 +200,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.currentCommitIndex--
 			}
 			return m, nil
-		case "p": // Toggle auto-progression
+		case "up", "k":
+			if len(m.availableStatYears) > 0 {
+				m.currentStatYearIndex = (m.currentStatYearIndex + 1) % len(m.availableStatYears)
+				m.displayedStatsYear = m.availableStatYears[m.currentStatYearIndex]
+			}
+			return m, nil
+		case "down", "j":
+			if len(m.availableStatYears) > 0 {
+				m.currentStatYearIndex--
+				if m.currentStatYearIndex < 0 {
+					m.currentStatYearIndex = len(m.availableStatYears) - 1
+				}
+				m.displayedStatsYear = m.availableStatYears[m.currentStatYearIndex]
+			}
+			return m, nil
+		case "p", " ": // Toggle auto-progression
 			m.autoProgress = !m.autoProgress
+			// When turning auto-progress on, snap stats view to latest year
+			if m.autoProgress {
+				m.displayedStatsYear = -1 // -1 signifies latest
+			}
 			return m, nil
 		}
 	case tea.WindowSizeMsg:
@@ -209,6 +234,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			select {
 			case newCommit, ok := <-m.processedCommitsChan:
 				if ok {
+					var previousYear int
+					if len(m.commits) > 0 {
+						previousYear = m.commits[m.currentCommitIndex].date.Year()
+					}
+
 					// Atomically process the new commit and update the index
 					newCommit.diffLoaded = true
 
@@ -218,6 +248,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						newCommit.cumulativeAdditions = lastCommit.cumulativeAdditions + newCommit.additions
 						newCommit.cumulativeDeletions = lastCommit.cumulativeDeletions + newCommit.deletions
 					} else {
+						previousYear = newCommit.date.Year()
 						newCommit.cumulativeFiles = newCommit.files
 						newCommit.cumulativeAdditions = newCommit.additions
 						newCommit.cumulativeDeletions = newCommit.deletions
@@ -232,6 +263,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 					m.commits = append(m.commits, newCommit)
 					m.currentCommitIndex = len(m.commits) - 1
+
+					// If the year has changed, and we are in "latest year" mode, update the stats view
+					newYear := newCommit.date.Year()
+					if newYear != previousYear && m.displayedStatsYear == -1 {
+						// The view will automatically update in the render function
+					}
 
 				} else {
 					m.loadingComplete = true
@@ -391,9 +428,9 @@ func (m *Model) renderTimeline(timelineHeight int) string {
 
 	labelWidth := 8
 	statsWidth := 15
-	padding := 2
-	availableWidth := m.width/2 - 6
-	msgWidth := availableWidth - labelWidth - statsWidth - padding
+padding := 2
+availableWidth := m.width/2 - 6
+msgWidth := availableWidth - labelWidth - statsWidth - padding
 	if msgWidth < 20 {
 		msgWidth = 20
 	}
@@ -519,41 +556,90 @@ func (m *Model) renderLOCGraph(graphHeight int) string {
 }
 
 func (m *Model) renderDeveloperStats() string {
-	// Calculate stats dynamically based on the current index
-	authorChurn := make(map[string]int)
+	// --- Data Aggregation ---
+	allTimeAuthorChurn := make(map[string]int)
+	yearlyAuthorChurn := make(map[int]map[string]int)
 	weekdayCounts := make(map[time.Weekday]int)
 	monthCounts := make(map[time.Month]int)
 	hourCounts := make(map[int]int)
 
 	for i := 0; i <= m.currentCommitIndex; i++ {
 		c := m.commits[i]
-		authorChurn[c.author] += c.churn
+		year := c.date.Year()
+
+		// Aggregate all-time stats
+		allTimeAuthorChurn[c.author] += c.churn
 		weekdayCounts[c.date.Weekday()]++
 		monthCounts[c.date.Month()]++
 		hourCounts[c.date.Local().Hour()]++
+
+		// Aggregate yearly stats
+		if _, ok := yearlyAuthorChurn[year]; !ok {
+			yearlyAuthorChurn[year] = make(map[string]int)
+		}
+		yearlyAuthorChurn[year][c.author] += c.churn
 	}
 
-	// Determine top contributors
-	topContributors := make([]authorStat, 0, len(authorChurn))
-	for name, churn := range authorChurn {
-		topContributors = append(topContributors, authorStat{name: name, churn: churn})
+	// --- Process Stats ---
+
+	// Process all-time top contributors
+	allTimeTopContributors := make([]authorStat, 0, len(allTimeAuthorChurn))
+	for name, churn := range allTimeAuthorChurn {
+		allTimeTopContributors = append(allTimeTopContributors, authorStat{name: name, churn: churn})
 	}
-	sort.Slice(topContributors, func(i, j int) bool {
-		return topContributors[i].churn > topContributors[j].churn
+	sort.Slice(allTimeTopContributors, func(i, j int) bool {
+		return allTimeTopContributors[i].churn > allTimeTopContributors[j].churn
 	})
 
+	// Process yearly top contributors
+	yearlyTopContributors := make(map[int][]authorStat)
+	years := make([]int, 0, len(yearlyAuthorChurn))
+	for year, churnMap := range yearlyAuthorChurn {
+		years = append(years, year)
+		yearList := make([]authorStat, 0, len(churnMap))
+		for name, churn := range churnMap {
+			yearList = append(yearList, authorStat{name: name, churn: churn})
+		}
+		sort.Slice(yearList, func(i, j int) bool {
+			return yearList[i].churn > yearList[j].churn
+		})
+		yearlyTopContributors[year] = yearList
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(years)))
+
+	// Update available years for cycling
+	m.availableStatYears = []int{-1, 0} // -1 for Latest, 0 for All-Time
+	m.availableStatYears = append(m.availableStatYears, years...)
+
+	// --- Determine which stats to display ---
+	displayYear := m.displayedStatsYear
+	var listToShow []authorStat
+	var headerText string
+
+	if displayYear == -1 { // Latest Year
+		currentYear := m.commits[m.currentCommitIndex].date.Year()
+		headerText = fmt.Sprintf("Top 5 (%d)", currentYear)
+		listToShow = yearlyTopContributors[currentYear]
+	} else if displayYear == 0 { // All-Time
+		headerText = "Top 5 (All-Time)"
+		listToShow = allTimeTopContributors
+	} else { // Specific Year
+		headerText = fmt.Sprintf("Top 5 (%d)", displayYear)
+		listToShow = yearlyTopContributors[displayYear]
+	}
+
+	// --- Rendering ---
 	var b strings.Builder
 	availableWidth := m.width/2 - 8
-
 	barChartWidth := availableWidth - 20
 	if barChartWidth < 10 {
 		barChartWidth = 10
 	}
 
-	b.WriteString(headerStyle.Render("Top 5 Contributors (by churn)"))
+	b.WriteString(headerStyle.Render(headerText))
 	b.WriteString("\n")
-	for i := 0; i < len(topContributors) && i < 5; i++ {
-		b.WriteString(fmt.Sprintf(" %-18s %d\n", truncateMessage(topContributors[i].name, 32), topContributors[i].churn))
+	for i := 0; i < len(listToShow) && i < 5; i++ {
+		b.WriteString(fmt.Sprintf(" %-18s %d\n", truncateMessage(listToShow[i].name, 32), listToShow[i].churn))
 	}
 	b.WriteString("\n")
 
