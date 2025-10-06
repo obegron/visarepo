@@ -59,7 +59,7 @@ type Model struct {
 	program              *tea.Program
 
 	// State for developer stats view
-	displayedStatsYear   int // 0 for All-Time, -1 for Latest Year
+	displayedStatsYear   int // 0 for All-Time
 	availableStatYears   []int
 	currentStatYearIndex int
 }
@@ -80,7 +80,8 @@ func InitialModel(cfg Config) Model {
 		maxDeletions:         0,
 		loadingComplete:      false,
 		processedCommitsChan: make(chan *commitInfo, 100),
-		displayedStatsYear:   -1, // Default to latest year
+		displayedStatsYear:   0, // Default to All-Time
+		currentStatYearIndex: 0, // Default to All-Time
 	}
 }
 
@@ -202,12 +203,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "up", "k":
 			if len(m.availableStatYears) > 0 {
-				m.currentStatYearIndex = (m.currentStatYearIndex + 1) % len(m.availableStatYears)
-				m.displayedStatsYear = m.availableStatYears[m.currentStatYearIndex]
-			}
-			return m, nil
-		case "down", "j":
-			if len(m.availableStatYears) > 0 {
 				m.currentStatYearIndex--
 				if m.currentStatYearIndex < 0 {
 					m.currentStatYearIndex = len(m.availableStatYears) - 1
@@ -215,12 +210,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.displayedStatsYear = m.availableStatYears[m.currentStatYearIndex]
 			}
 			return m, nil
+		case "down", "j":
+			if len(m.availableStatYears) > 0 {
+				m.currentStatYearIndex = (m.currentStatYearIndex + 1) % len(m.availableStatYears)
+				m.displayedStatsYear = m.availableStatYears[m.currentStatYearIndex]
+			}
+			return m, nil
 		case "p", " ": // Toggle auto-progression
 			m.autoProgress = !m.autoProgress
-			// When turning auto-progress on, snap stats view to latest year
-			if m.autoProgress {
-				m.displayedStatsYear = -1 // -1 signifies latest
-			}
 			return m, nil
 		}
 	case tea.WindowSizeMsg:
@@ -234,11 +231,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			select {
 			case newCommit, ok := <-m.processedCommitsChan:
 				if ok {
-					var previousYear int
-					if len(m.commits) > 0 {
-						previousYear = m.commits[m.currentCommitIndex].date.Year()
-					}
-
 					// Atomically process the new commit and update the index
 					newCommit.diffLoaded = true
 
@@ -248,7 +240,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						newCommit.cumulativeAdditions = lastCommit.cumulativeAdditions + newCommit.additions
 						newCommit.cumulativeDeletions = lastCommit.cumulativeDeletions + newCommit.deletions
 					} else {
-						previousYear = newCommit.date.Year()
 						newCommit.cumulativeFiles = newCommit.files
 						newCommit.cumulativeAdditions = newCommit.additions
 						newCommit.cumulativeDeletions = newCommit.deletions
@@ -263,12 +254,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 					m.commits = append(m.commits, newCommit)
 					m.currentCommitIndex = len(m.commits) - 1
-
-					// If the year has changed, and we are in "latest year" mode, update the stats view
-					newYear := newCommit.date.Year()
-					if newYear != previousYear && m.displayedStatsYear == -1 {
-						// The view will automatically update in the render function
-					}
 
 				} else {
 					m.loadingComplete = true
@@ -428,9 +413,9 @@ func (m *Model) renderTimeline(timelineHeight int) string {
 
 	labelWidth := 8
 	statsWidth := 15
-padding := 2
-availableWidth := m.width/2 - 6
-msgWidth := availableWidth - labelWidth - statsWidth - padding
+	padding := 2
+	availableWidth := m.width/2 - 6
+	msgWidth := availableWidth - labelWidth - statsWidth - padding
 	if msgWidth < 20 {
 		msgWidth = 20
 	}
@@ -594,8 +579,13 @@ func (m *Model) renderDeveloperStats() string {
 	// Process yearly top contributors
 	yearlyTopContributors := make(map[int][]authorStat)
 	years := make([]int, 0, len(yearlyAuthorChurn))
-	for year, churnMap := range yearlyAuthorChurn {
+	for year := range yearlyAuthorChurn {
 		years = append(years, year)
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(years)))
+
+	for _, year := range years {
+		churnMap := yearlyAuthorChurn[year]
 		yearList := make([]authorStat, 0, len(churnMap))
 		for name, churn := range churnMap {
 			yearList = append(yearList, authorStat{name: name, churn: churn})
@@ -605,27 +595,20 @@ func (m *Model) renderDeveloperStats() string {
 		})
 		yearlyTopContributors[year] = yearList
 	}
-	sort.Sort(sort.Reverse(sort.IntSlice(years)))
 
-	// Update available years for cycling
-	m.availableStatYears = []int{-1, 0} // -1 for Latest, 0 for All-Time
-	m.availableStatYears = append(m.availableStatYears, years...)
+	// Update available years for cycling: [All-Time, Latest, ..., Oldest]
+	m.availableStatYears = append([]int{0}, years...)
 
 	// --- Determine which stats to display ---
-	displayYear := m.displayedStatsYear
 	var listToShow []authorStat
 	var headerText string
 
-	if displayYear == -1 { // Latest Year
-		currentYear := m.commits[m.currentCommitIndex].date.Year()
-		headerText = fmt.Sprintf("Top 5 (%d)", currentYear)
-		listToShow = yearlyTopContributors[currentYear]
-	} else if displayYear == 0 { // All-Time
+	if m.displayedStatsYear == 0 { // All-Time
 		headerText = "Top 5 (All-Time)"
 		listToShow = allTimeTopContributors
 	} else { // Specific Year
-		headerText = fmt.Sprintf("Top 5 (%d)", displayYear)
-		listToShow = yearlyTopContributors[displayYear]
+		headerText = fmt.Sprintf("Top 5 (%d)", m.displayedStatsYear)
+		listToShow = yearlyTopContributors[m.displayedStatsYear]
 	}
 
 	// --- Rendering ---
