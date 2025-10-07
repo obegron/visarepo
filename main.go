@@ -23,8 +23,8 @@ func loadConfig() (Config, error) {
 	config := Config{
 		CommitLimit:        -1,
 		RepoPath:           ".",
-		AutoProgress:       false,
-		ProgressIntervalMs: 50, // milliseconds
+		AutoProgress:       true,
+		ProgressIntervalMs: 25, // milliseconds
 	}
 
 	configFile, err := os.ReadFile(".visagit.yml")
