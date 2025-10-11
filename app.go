@@ -351,8 +351,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
+		m.width = msg.Width - 10
+		m.height = msg.Height - 10
 		m.graphColumns = m.width/2 - 10
 		m.networkGraphHeight = m.height/3 - 10
 
