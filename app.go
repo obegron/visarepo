@@ -13,15 +13,24 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
+)
+
+type diffViewState int
+
+const (
+	notInDiffView diffViewState = iota
+	inDiffView
 )
 
 // commitInfo holds the information for a single commit
 type commitInfo struct {
-	hash       string
-	message    string
-	author     string
-	date       time.Time
-	diffLoaded bool
+	hash        string
+	message     string
+	author      string
+	date        time.Time
+	diffLoaded  bool
+	diffContent string // To cache the diff
 
 	// These are the diff stats for this specific commit
 	files     int
@@ -43,6 +52,7 @@ type authorStat struct {
 // Model represents the Bubble Tea application model
 type Model struct {
 	config             Config
+	repo               *git.Repository
 	commits            []*commitInfo
 	currentCommitIndex int
 	width, height      int // Terminal dimensions
@@ -57,6 +67,9 @@ type Model struct {
 	processedCommitsChan chan *commitInfo
 	loadingComplete      bool
 	program              *tea.Program
+	diffState            diffViewState
+	currentDiff          string
+	diffScroll           int
 
 	// State for developer stats view
 	displayedStatsYear   int // 0 for All-Time
@@ -80,6 +93,7 @@ func InitialModel(cfg Config) Model {
 		maxDeletions:         0,
 		loadingComplete:      false,
 		processedCommitsChan: make(chan *commitInfo, 100),
+		diffState:            notInDiffView,
 		displayedStatsYear:   0, // Default to All-Time
 		currentStatYearIndex: 0, // Default to All-Time
 	}
@@ -100,6 +114,7 @@ func (m *Model) fetcher() {
 		}
 		return
 	}
+	m.repo = r
 
 	cmd := exec.Command("git", "-C", m.config.RepoPath, "rev-list", "--reverse", "HEAD")
 	stdout, err := cmd.StdoutPipe()
@@ -183,46 +198,161 @@ func (m *Model) progressTickCmd() tea.Cmd {
 	})
 }
 
+func getDiff(r *git.Repository, commit *commitInfo) (string, error) {
+	if commit.diffContent != "" {
+		return commit.diffContent, nil
+	}
+
+	hash := plumbing.NewHash(commit.hash)
+	commitObject, err := r.CommitObject(hash)
+	if err != nil {
+		return "", err
+	}
+
+	if commitObject.NumParents() == 0 {
+		// Initial commit, diff against empty tree
+		tree, err := commitObject.Tree()
+		if err != nil {
+			return "", err
+		}
+		emptyTree := &object.Tree{}
+		patch, err := emptyTree.Patch(tree)
+		if err != nil {
+			return "", err
+		}
+		commit.diffContent = patch.String()
+		return commit.diffContent, nil
+	}
+
+	parent, err := commitObject.Parent(0)
+	if err != nil {
+		return "", err
+	}
+	cTree, err := commitObject.Tree()
+	if err != nil {
+		return "", err
+	}
+	pTree, err := parent.Tree()
+	if err != nil {
+		return "", err
+	}
+	patch, err := pTree.Patch(cTree)
+	if err != nil {
+		return "", err
+	}
+
+	commit.diffContent = patch.String()
+	return commit.diffContent, nil
+}
+
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "ctrl+c":
-			return m, tea.Quit
-		case "right", "l":
-			m.autoProgress = false
-			if m.currentCommitIndex < len(m.commits)-1 {
-				m.currentCommitIndex++
-			}
-			return m, nil
-		case "left", "h":
-			m.autoProgress = false
-			if m.currentCommitIndex > 0 {
-				m.currentCommitIndex--
-			}
-			return m, nil
-		case "up", "k":
-			if len(m.availableStatYears) > 0 {
-				m.currentStatYearIndex--
-				if m.currentStatYearIndex < 0 {
-					m.currentStatYearIndex = len(m.availableStatYears) - 1
+		if m.diffState == inDiffView {
+			switch msg.String() {
+			case "q", "ctrl+c", "esc", "enter":
+				m.diffState = notInDiffView
+				return m, nil
+			case "up", "k":
+				m.diffScroll--
+				if m.diffScroll < 0 {
+					m.diffScroll = 0
 				}
-				m.displayedStatsYear = m.availableStatYears[m.currentStatYearIndex]
+				return m, nil
+			case "down", "j":
+				m.diffScroll++
+				return m, nil
+			case "pgup":
+				m.diffScroll -= m.height
+				if m.diffScroll < 0 {
+					m.diffScroll = 0
+				}
+				return m, nil
+			case "pgdown", " ":
+				m.diffScroll += m.height
+				return m, nil
+			case "left", "h":
+				m.autoProgress = false
+				if m.currentCommitIndex > 0 {
+					m.currentCommitIndex--
+					currentCommit := m.commits[m.currentCommitIndex]
+					diff, err := getDiff(m.repo, currentCommit)
+					if err != nil {
+						m.currentDiff = fmt.Sprintf("Error getting diff: %v", err)
+					} else {
+						m.currentDiff = diff
+					}
+					m.diffScroll = 0
+				}
+				return m, nil
+			case "right", "l":
+				m.autoProgress = false
+				if m.currentCommitIndex < len(m.commits)-1 {
+					m.currentCommitIndex++
+					currentCommit := m.commits[m.currentCommitIndex]
+					diff, err := getDiff(m.repo, currentCommit)
+					if err != nil {
+						m.currentDiff = fmt.Sprintf("Error getting diff: %v", err)
+					} else {
+						m.currentDiff = diff
+					}
+					m.diffScroll = 0
+				}
+				return m, nil
 			}
-			return m, nil
-		case "down", "j":
-			if len(m.availableStatYears) > 0 {
-				m.currentStatYearIndex = (m.currentStatYearIndex + 1) % len(m.availableStatYears)
-				m.displayedStatsYear = m.availableStatYears[m.currentStatYearIndex]
+		} else {
+			switch msg.String() {
+			case "q", "ctrl+c":
+				return m, tea.Quit
+			case "right", "l":
+				m.autoProgress = false
+				if m.currentCommitIndex < len(m.commits)-1 {
+					m.currentCommitIndex++
+				}
+				return m, nil
+			case "left", "h":
+				m.autoProgress = false
+				if m.currentCommitIndex > 0 {
+					m.currentCommitIndex--
+				}
+				return m, nil
+			case "up", "k":
+				if len(m.availableStatYears) > 0 {
+					m.currentStatYearIndex--
+					if m.currentStatYearIndex < 0 {
+						m.currentStatYearIndex = len(m.availableStatYears) - 1
+					}
+					m.displayedStatsYear = m.availableStatYears[m.currentStatYearIndex]
+				}
+				return m, nil
+			case "down", "j":
+				if len(m.availableStatYears) > 0 {
+					m.currentStatYearIndex = (m.currentStatYearIndex + 1) % len(m.availableStatYears)
+					m.displayedStatsYear = m.availableStatYears[m.currentStatYearIndex]
+				}
+				return m, nil
+			case "p", " ": // Toggle auto-progression
+				m.autoProgress = !m.autoProgress
+				return m, nil
+			case "enter":
+				if !m.autoProgress {
+					m.diffState = inDiffView
+					m.diffScroll = 0
+					currentCommit := m.commits[m.currentCommitIndex]
+					diff, err := getDiff(m.repo, currentCommit)
+					if err != nil {
+						m.currentDiff = fmt.Sprintf("Error getting diff: %v", err)
+					} else {
+						m.currentDiff = diff
+					}
+				}
+				return m, nil
 			}
-			return m, nil
-		case "p", " ": // Toggle auto-progression
-			m.autoProgress = !m.autoProgress
-			return m, nil
 		}
+
 	case tea.WindowSizeMsg:
-		m.width = msg.Width - 10
-		m.height = msg.Height - 10
+		m.width = msg.Width
+		m.height = msg.Height
 		m.graphColumns = m.width/2 - 10
 		m.networkGraphHeight = m.height/3 - 10
 
@@ -272,10 +402,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // --- Lipgloss Styles ---
 var (
-	panelStyle         = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("239")).Padding(0, 1)
-	headerStyle        = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("147")).Padding(0, 1).Align(lipgloss.Center)
-	statsLabelStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Align(lipgloss.Right).Width(12)
-	statsValueStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("117")).Bold(true).Align(lipgloss.Left).Width(12)
+	panelStyle      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("239")).Padding(0, 1)
+	headerStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("147")).Padding(0, 1).Align(lipgloss.Center)
+	statsLabelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Align(lipgloss.Right).Width(12)
+	statsValueStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("117")).Bold(true).Align(lipgloss.Left).Width(12)
 
 	barChar           = "█"
 	barStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
@@ -325,7 +455,43 @@ func (m *Model) renderCombinedChangesGraph(height int) string {
 	return locGraph
 }
 
+func (m *Model) renderDiffView() string {
+	lines := strings.Split(m.currentDiff, "\n")
+
+	// Handle scrolling
+	start := m.diffScroll
+	end := start + m.height
+	if start < 0 {
+		start = 0
+	}
+	if end > len(lines) {
+		end = len(lines)
+	}
+	if start > end {
+		start = end
+	}
+
+	visibleLines := lines[start:end]
+
+	var builder strings.Builder
+	for _, line := range visibleLines {
+		style := lipgloss.NewStyle()
+		if strings.HasPrefix(line, "+") {
+			style = additionStyle
+		} else if strings.HasPrefix(line, "-") {
+			style = deletionStyle
+		}
+		builder.WriteString(style.Render(line))
+		builder.WriteString("\n")
+	}
+
+	return builder.String()
+}
+
 func (m *Model) View() string {
+	if m.diffState == inDiffView {
+		return m.renderDiffView()
+	}
 	if len(m.commits) == 0 {
 		return "Loading commits..."
 	}
@@ -413,9 +579,9 @@ func (m *Model) renderTimeline(timelineHeight int) string {
 
 	labelWidth := 8
 	statsWidth := 15
-padding := 2
-availableWidth := m.width/2 - 6
-msgWidth := availableWidth - labelWidth - statsWidth - padding
+	padding := 2
+	availableWidth := m.width/2 - 6
+	msgWidth := availableWidth - labelWidth - statsWidth - padding
 	if msgWidth < 20 {
 		msgWidth = 20
 	}
@@ -597,8 +763,8 @@ func (m *Model) renderDeveloperStats() string {
 
 	var b strings.Builder
 
-availableWidth := m.width/2 - 8
-barChartWidth := availableWidth - 20
+	availableWidth := m.width/2 - 8
+	barChartWidth := availableWidth - 20
 	if barChartWidth < 10 {
 		barChartWidth = 10
 	}
