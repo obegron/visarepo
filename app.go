@@ -477,26 +477,25 @@ func (m *Model) renderBrailleGraph(graphHeight int) string {
 		graphHeight = 5
 	}
 
+	// Each braille character can hold 2 pixels horizontally, so we can fit 2 commits per character
 	canvas := NewBrailleCanvas(m.graphColumns*2, graphHeight*4)
 
-	windowSize := m.graphColumns
 	displayCommits := m.commits[:m.currentCommitIndex+1]
 
+	// We can display m.graphColumns*2 commits (2 per braille character)
+	windowSize := m.graphColumns * 2
 	startIndex := max(0, len(displayCommits)-windowSize)
 	endIndex := len(displayCommits)
-
-	maxVal := max(m.maxAdditions, m.maxDeletions)
-	if maxVal < 1 {
-		maxVal = 1
-	}
 
 	zeroLine := canvas.Height / 2
 
 	for i := startIndex; i < endIndex; i++ {
 		c := displayCommits[i]
-		col := m.graphColumns - (endIndex - i)
 
-		if col < 0 || col >= m.graphColumns {
+		// Map commit index to pixel x position (not character position)
+		pixelX := i - startIndex
+
+		if pixelX < 0 || pixelX >= m.graphColumns*2 {
 			continue
 		}
 
@@ -518,14 +517,14 @@ func (m *Model) renderBrailleGraph(graphHeight int) string {
 			scaledDeletions = int((math.Log1p(float64(c.Deletions)) / logMaxDel) * float64(zeroLine-1))
 		}
 
-		// Draw additions
-		for y := 0; y < scaledAdditions; y++ {
-			canvas.Set(col*2, zeroLine-y)
+		// Draw additions (upward from zero line) for this single pixel column
+		for y := 0; y <= scaledAdditions; y++ {
+			canvas.Set(pixelX, zeroLine-y)
 		}
 
-		// Draw deletions
-		for y := 0; y < scaledDeletions; y++ {
-			canvas.Set(col*2, zeroLine+y)
+		// Draw deletions (downward from zero line) for this single pixel column
+		for y := 0; y <= scaledDeletions; y++ {
+			canvas.Set(pixelX, zeroLine+y)
 		}
 	}
 
