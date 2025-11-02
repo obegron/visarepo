@@ -25,23 +25,23 @@ const (
 
 // commitInfo holds the information for a single commit
 type commitInfo struct {
-	hash        string
-	message     string
-	author      string
-	date        time.Time
-	diffLoaded  bool
-	diffContent string // To cache the diff
+	Hash        string    `json:"hash" yaml:"hash"`
+	Message     string    `json:"message" yaml:"message"`
+	Author      string    `json:"author" yaml:"author"`
+	Date        time.Time `json:"date" yaml:"date"`
+	DiffLoaded  bool      `json:"-" yaml:"-"` // Don't export these
+	DiffContent string    `json:"-" yaml:"-"` // To cache the diff
 
 	// These are the diff stats for this specific commit
-	files     int
-	additions int
-	deletions int
-	churn     int
+	Files     int `json:"files" yaml:"files"`
+	Additions int `json:"additions" yaml:"additions"`
+	Deletions int `json:"deletions" yaml:"deletions"`
+	Churn     int `json:"churn" yaml:"churn"`
 
 	// These are the cumulative stats up to this this commit
-	cumulativeFiles     int
-	cumulativeAdditions int
-	cumulativeDeletions int
+	CumulativeFiles     int `json:"cumulative_files" yaml:"cumulative_files"`
+	CumulativeAdditions int `json:"cumulative_additions" yaml:"cumulative_additions"`
+	CumulativeDeletions int `json:"cumulative_deletions" yaml:"cumulative_deletions"`
 }
 
 type authorStat struct {
@@ -172,14 +172,14 @@ func (m *Model) fetcher() {
 		}
 
 		m.processedCommitsChan <- &commitInfo{
-			hash:      commit.Hash.String(),
-			message:   commit.Message,
-			author:    commit.Author.Name,
-			date:      commit.Author.When,
-			files:     filesChanged,
-			additions: additions,
-			deletions: deletions,
-			churn:     churn,
+			Hash:      commit.Hash.String(),
+			Message:   commit.Message,
+			Author:    commit.Author.Name,
+			Date:      commit.Author.When,
+			Files:     filesChanged,
+			Additions: additions,
+			Deletions: deletions,
+			Churn:     churn,
 		}
 		commitCount++
 		if m.config.CommitLimit > 0 && commitCount >= m.config.CommitLimit {
@@ -199,11 +199,11 @@ func (m *Model) progressTickCmd() tea.Cmd {
 }
 
 func getDiff(r *git.Repository, commit *commitInfo) (string, error) {
-	if commit.diffContent != "" {
-		return commit.diffContent, nil
+	if commit.DiffContent != "" {
+		return commit.DiffContent, nil
 	}
 
-	hash := plumbing.NewHash(commit.hash)
+	hash := plumbing.NewHash(commit.Hash)
 	commitObject, err := r.CommitObject(hash)
 	if err != nil {
 		return "", err
@@ -220,8 +220,8 @@ func getDiff(r *git.Repository, commit *commitInfo) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		commit.diffContent = patch.String()
-		return commit.diffContent, nil
+		commit.DiffContent = patch.String()
+		return commit.DiffContent, nil
 	}
 
 	parent, err := commitObject.Parent(0)
@@ -241,8 +241,8 @@ func getDiff(r *git.Repository, commit *commitInfo) (string, error) {
 		return "", err
 	}
 
-	commit.diffContent = patch.String()
-	return commit.diffContent, nil
+	commit.DiffContent = patch.String()
+	return commit.DiffContent, nil
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -362,24 +362,24 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case newCommit, ok := <-m.processedCommitsChan:
 				if ok {
 					// Atomically process the new commit and update the index
-					newCommit.diffLoaded = true
+					newCommit.DiffLoaded = true
 
 					if len(m.commits) > 0 {
 						lastCommit := m.commits[len(m.commits)-1]
-						newCommit.cumulativeFiles = lastCommit.cumulativeFiles + newCommit.files
-						newCommit.cumulativeAdditions = lastCommit.cumulativeAdditions + newCommit.additions
-						newCommit.cumulativeDeletions = lastCommit.cumulativeDeletions + newCommit.deletions
+						newCommit.CumulativeFiles = lastCommit.CumulativeFiles + newCommit.Files
+						newCommit.CumulativeAdditions = lastCommit.CumulativeAdditions + newCommit.Additions
+						newCommit.CumulativeDeletions = lastCommit.CumulativeDeletions + newCommit.Deletions
 					} else {
-						newCommit.cumulativeFiles = newCommit.files
-						newCommit.cumulativeAdditions = newCommit.additions
-						newCommit.cumulativeDeletions = newCommit.deletions
+						newCommit.CumulativeFiles = newCommit.Files
+						newCommit.CumulativeAdditions = newCommit.Additions
+						newCommit.CumulativeDeletions = newCommit.Deletions
 					}
 
-					if newCommit.additions > m.maxAdditions {
-						m.maxAdditions = newCommit.additions
+					if newCommit.Additions > m.maxAdditions {
+						m.maxAdditions = newCommit.Additions
 					}
-					if newCommit.deletions > m.maxDeletions {
-						m.maxDeletions = newCommit.deletions
+					if newCommit.Deletions > m.maxDeletions {
+						m.maxDeletions = newCommit.Deletions
 					}
 
 					m.commits = append(m.commits, newCommit)
@@ -418,6 +418,31 @@ var (
 	deletionStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("203")) // Bright red
 	graphAxisStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 	graphHighlight = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Bold(true)
+
+	additionGradient = []lipgloss.Color{
+		lipgloss.Color("#E6FFE6"),
+		lipgloss.Color("#CCFFCC"),
+		lipgloss.Color("#B3FFB3"),
+		lipgloss.Color("#99FF99"),
+		lipgloss.Color("#80FF80"),
+		lipgloss.Color("#66FF66"),
+		lipgloss.Color("#4DFF4D"),
+		lipgloss.Color("#33FF33"),
+		lipgloss.Color("#1AFF1A"),
+		lipgloss.Color("#00FF00"), // Stronger green base
+	}
+	deletionGradient = []lipgloss.Color{
+		lipgloss.Color("#FF0000"), // Stronger red base
+		lipgloss.Color("#FF1A1A"),
+		lipgloss.Color("#FF3333"),
+		lipgloss.Color("#FF4D4D"),
+		lipgloss.Color("#FF6666"),
+		lipgloss.Color("#FF8080"),
+		lipgloss.Color("#FF9999"),
+		lipgloss.Color("#FFB3B3"),
+		lipgloss.Color("#FFCCCC"),
+		lipgloss.Color("#FFE6E6"),
+	}
 )
 
 func (m *Model) renderPanelWithHeader(title string, content string, width int, height int) string {
@@ -444,15 +469,100 @@ func (m *Model) renderPanelWithHeader(title string, content string, width int, h
 	return panel.Render(fullContent)
 }
 
-func (m *Model) renderCombinedChangesGraph(height int) string {
-	if height < 10 {
-		return "Not enough space"
+func (m *Model) renderBrailleGraph(graphHeight int) string {
+	if len(m.commits) == 0 || m.graphColumns <= 10 {
+		return "Insufficient data"
+	}
+	if graphHeight < 5 {
+		graphHeight = 5
 	}
 
-	locGraphHeight := height
-	locGraph := m.renderLOCGraph(locGraphHeight)
+	canvas := NewBrailleCanvas(m.graphColumns*2, graphHeight*4)
 
-	return locGraph
+	windowSize := m.graphColumns
+	displayCommits := m.commits[:m.currentCommitIndex+1]
+
+	startIndex := max(0, len(displayCommits)-windowSize)
+	endIndex := len(displayCommits)
+
+	maxVal := max(m.maxAdditions, m.maxDeletions)
+	if maxVal < 1 {
+		maxVal = 1
+	}
+
+	zeroLine := canvas.Height / 2
+
+	for i := startIndex; i < endIndex; i++ {
+		c := displayCommits[i]
+		col := m.graphColumns - (endIndex - i)
+
+		if col < 0 || col >= m.graphColumns {
+			continue
+		}
+
+		logMaxAdd := math.Log1p(float64(m.maxAdditions))
+		if logMaxAdd == 0 {
+			logMaxAdd = 1
+		}
+		logMaxDel := math.Log1p(float64(m.maxDeletions))
+		if logMaxDel == 0 {
+			logMaxDel = 1
+		}
+
+		scaledAdditions := 0
+		if c.Additions > 0 {
+			scaledAdditions = int((math.Log1p(float64(c.Additions)) / logMaxAdd) * float64(zeroLine-1))
+		}
+		scaledDeletions := 0
+		if c.Deletions > 0 {
+			scaledDeletions = int((math.Log1p(float64(c.Deletions)) / logMaxDel) * float64(zeroLine-1))
+		}
+
+		// Draw additions
+		for y := 0; y < scaledAdditions; y++ {
+			canvas.Set(col*2, zeroLine-y)
+		}
+
+		// Draw deletions
+		for y := 0; y < scaledDeletions; y++ {
+			canvas.Set(col*2, zeroLine+y)
+		}
+	}
+
+	return m.colorizeBraille(canvas)
+}
+
+func (m *Model) colorizeBraille(canvas *BrailleCanvas) string {
+	var coloredFrame strings.Builder
+	frame := canvas.String()
+	for y, line := range strings.Split(frame, "\n") {
+		for _, char := range line {
+			if char == ' ' {
+				coloredFrame.WriteString(" ")
+			} else {
+				color := lipgloss.Color("#FFFFFF") // Default color
+				if y < canvas.Height/8 {
+					// Additions
+					colorIndex := int(float64(y) / float64(canvas.Height/8) * float64(len(additionGradient)))
+					if colorIndex >= len(additionGradient) {
+						colorIndex = len(additionGradient) - 1
+					}
+					color = additionGradient[colorIndex]
+				} else {
+					// Deletions
+					colorIndex := int(float64(y-canvas.Height/8) / float64(canvas.Height/8) * float64(len(deletionGradient)))
+					if colorIndex >= len(deletionGradient) {
+						colorIndex = len(deletionGradient) - 1
+					}
+					color = deletionGradient[colorIndex]
+				}
+				coloredFrame.WriteString(lipgloss.NewStyle().Foreground(color).Render(string(char)))
+			}
+		}
+		coloredFrame.WriteString("\n")
+	}
+
+	return coloredFrame.String()
 }
 
 func (m *Model) renderDiffView() string {
@@ -504,13 +614,13 @@ func (m *Model) View() string {
 	// Calculate author count dynamically
 	authorSet := make(map[string]struct{})
 	for i := 0; i <= m.currentCommitIndex; i++ {
-		authorSet[m.commits[i].author] = struct{}{}
+		authorSet[m.commits[i].Author] = struct{}{}
 	}
 
 	statsBuilder := strings.Builder{}
 
-	statsBuilder.WriteString(fmt.Sprintf("  Author: %s\n", currentCommit.author))
-	statsBuilder.WriteString(fmt.Sprintf("  Date: %s\n", currentCommit.date.Format("2006-01-02 15:04")))
+	statsBuilder.WriteString(fmt.Sprintf("  Author: %s\n", currentCommit.Author))
+	statsBuilder.WriteString(fmt.Sprintf("  Date: %s\n", currentCommit.Date.Format("2006-01-02 15:04")))
 	statsBuilder.WriteString("\n")
 	statsBuilder.WriteString(fmt.Sprintf("%s%s\n",
 		statsLabelStyle.Render("Commits:"),
@@ -521,10 +631,10 @@ func (m *Model) View() string {
 
 	statsBuilder.WriteString(fmt.Sprintf("%s%s\n",
 		statsLabelStyle.Render("Additions:"),
-		statsValueStyle.Render(fmt.Sprintf("+%d", currentCommit.cumulativeAdditions))))
+		statsValueStyle.Render(fmt.Sprintf("+%d", currentCommit.CumulativeAdditions))))
 	statsBuilder.WriteString(fmt.Sprintf("%s%s\n",
 		statsLabelStyle.Render("Deletions:"),
-		statsValueStyle.Render(fmt.Sprintf("-%d", currentCommit.cumulativeDeletions))))
+		statsValueStyle.Render(fmt.Sprintf("-%d", currentCommit.CumulativeDeletions))))
 
 	statsPanelHeight := 8
 	changesPanelHeight := m.height*2/3 - 10
@@ -535,11 +645,11 @@ func (m *Model) View() string {
 	}
 
 	barChartContent := m.renderTimeline(timelinePanelHeight - 3)
-	combinedGraphContent := m.renderCombinedChangesGraph(changesPanelHeight - 3)
+	brailleGraphContent := m.renderBrailleGraph(changesPanelHeight - 3)
 
 	leftColumn := lipgloss.JoinVertical(lipgloss.Left,
 		m.renderPanelWithHeader("Commit & Project Stats", statsBuilder.String(), m.width/2-2, statsPanelHeight),
-		m.renderPanelWithHeader("Commit Changes", combinedGraphContent, m.width/2-2, changesPanelHeight),
+		m.renderPanelWithHeader("Commit Changes", brailleGraphContent, m.width/2-2, changesPanelHeight),
 		m.renderPanelWithHeader("Commit Timeline", barChartContent, m.width/2-2, timelinePanelHeight),
 	)
 
@@ -589,16 +699,16 @@ func (m *Model) renderTimeline(timelineHeight int) string {
 	for i := visibleStart; i < visibleEnd; i++ {
 		c := m.commits[i]
 
-		label := barLabelStyle.Render(c.hash[:7])
+		label := barLabelStyle.Render(c.Hash[:7])
 
 		var stats string
-		addFormatted := "+" + formatStat(c.additions)
-		delFormatted := "-" + formatStat(c.deletions)
+		addFormatted := "+" + formatStat(c.Additions)
+		delFormatted := "-" + formatStat(c.Deletions)
 		addStr := lipgloss.NewStyle().Width(7).Align(lipgloss.Left).Render(additionStyle.Render(addFormatted))
 		delStr := lipgloss.NewStyle().Width(7).Align(lipgloss.Left).Render(deletionStyle.Render(delFormatted))
 		stats = lipgloss.JoinHorizontal(lipgloss.Left, addStr, " ", delStr)
 
-		msg := truncateMessage(c.message, msgWidth)
+		msg := truncateMessage(c.Message, msgWidth)
 		if i == m.currentCommitIndex {
 			msg = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Bold(true).Render(msg)
 		} else {
@@ -615,102 +725,11 @@ func (m *Model) renderTimeline(timelineHeight int) string {
 	return barChartContent.String()
 }
 
-func (m *Model) renderLOCGraph(graphHeight int) string {
-	if len(m.commits) == 0 || m.graphColumns <= 10 {
-		return "Insufficient data"
-	}
-	if graphHeight < 5 {
-		graphHeight = 5
-	}
-
-	windowSize := m.graphColumns
-	displayCommits := m.commits[:m.currentCommitIndex+1]
-
-	startIndex := max(0, len(displayCommits)-windowSize)
-	endIndex := len(displayCommits)
-
-	maxVal := max(m.maxAdditions, m.maxDeletions)
-	if maxVal < 1 {
-		maxVal = 1
-	}
-
-	grid := make([][]string, graphHeight)
-	for i := range grid {
-		grid[i] = make([]string, m.graphColumns)
-		for j := range grid[i] {
-			grid[i][j] = " "
-		}
-	}
-
-	zeroLine := graphHeight / 2
-	for col := 0; col < m.graphColumns; col++ {
-		grid[zeroLine][col] = graphAxisStyle.Render("─")
-	}
-
-	for i := startIndex; i < endIndex; i++ {
-		c := displayCommits[i]
-		col := m.graphColumns - (endIndex - i)
-
-		if col < 0 || col >= m.graphColumns {
-			continue
-		}
-
-		logMaxAdd := math.Log1p(float64(m.maxAdditions))
-		if logMaxAdd == 0 {
-			logMaxAdd = 1
-		}
-		logMaxDel := math.Log1p(float64(m.maxDeletions))
-		if logMaxDel == 0 {
-			logMaxDel = 1
-		}
-
-		scaledAdditions := 0
-		if c.additions > 0 {
-			scaledAdditions = int((math.Log1p(float64(c.additions)) / logMaxAdd) * float64(zeroLine-1))
-		}
-		scaledDeletions := 0
-		if c.deletions > 0 {
-			scaledDeletions = int((math.Log1p(float64(c.deletions)) / logMaxDel) * float64(zeroLine-1))
-		}
-
-		isCurrentCommit := (i == m.currentCommitIndex)
-
-		for y := 1; y <= scaledAdditions && y < zeroLine; y++ {
-			row := zeroLine - y
-			if isCurrentCommit {
-				grid[row][col] = graphHighlight.Render("█")
-			} else {
-				grid[row][col] = additionStyle.Render("█")
-			}
-		}
-
-		for y := 1; y <= scaledDeletions && zeroLine+y < graphHeight; y++ {
-			row := zeroLine + y
-			if isCurrentCommit {
-				grid[row][col] = graphHighlight.Render("█")
-			} else {
-				grid[row][col] = deletionStyle.Render("█")
-			}
-		}
-
-		if isCurrentCommit {
-			grid[zeroLine][col] = graphHighlight.Render("◆")
-		}
-	}
-
-	result := strings.Builder{}
-	for row := 0; row < graphHeight; row++ {
-		result.WriteString(strings.Join(grid[row], ""))
-		result.WriteString("\n")
-	}
-	return result.String()
-}
-
 func (m *Model) renderDeveloperStats() string {
 	// First, get the list of available years for the cycle control
 	yearSet := make(map[int]struct{})
 	for i := 0; i <= m.currentCommitIndex; i++ {
-		yearSet[m.commits[i].date.Year()] = struct{}{}
+		yearSet[m.commits[i].Date.Year()] = struct{}{}
 	}
 	years := make([]int, 0, len(yearSet))
 	for year := range yearSet {
@@ -726,7 +745,7 @@ func (m *Model) renderDeveloperStats() string {
 		commitsToAnalyze = m.commits[:m.currentCommitIndex+1]
 	} else {
 		for i := 0; i <= m.currentCommitIndex; i++ {
-			if m.commits[i].date.Year() == m.displayedStatsYear {
+			if m.commits[i].Date.Year() == m.displayedStatsYear {
 				commitsToAnalyze = append(commitsToAnalyze, m.commits[i])
 			}
 		}
@@ -738,10 +757,10 @@ func (m *Model) renderDeveloperStats() string {
 	hourCounts := make(map[int]int)
 
 	for _, c := range commitsToAnalyze {
-		authorChurn[c.author] += c.churn
-		weekdayCounts[c.date.Weekday()]++
-		monthCounts[c.date.Month()]++
-		hourCounts[c.date.Local().Hour()]++
+		authorChurn[c.Author] += c.Churn
+		weekdayCounts[c.Date.Weekday()]++
+		monthCounts[c.Date.Month()]++
+		hourCounts[c.Date.Local().Hour()]++
 	}
 
 	// Determine top contributors from the analyzed commits

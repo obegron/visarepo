@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -10,6 +11,45 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	yaml "gopkg.in/yaml.v2"
 )
+
+func runNonInteractive(config Config, format string) error {
+	model := InitialModel(config)
+	go model.fetcher()
+
+	var allCommits []*commitInfo
+	for commit := range model.processedCommitsChan {
+		if len(allCommits) > 0 {
+			lastCommit := allCommits[len(allCommits)-1]
+			commit.CumulativeFiles = lastCommit.CumulativeFiles + commit.Files
+			commit.CumulativeAdditions = lastCommit.CumulativeAdditions + commit.Additions
+			commit.CumulativeDeletions = lastCommit.CumulativeDeletions + commit.Deletions
+		} else {
+			commit.CumulativeFiles = commit.Files
+			commit.CumulativeAdditions = commit.Additions
+			commit.CumulativeDeletions = commit.Deletions
+		}
+		allCommits = append(allCommits, commit)
+	}
+
+	var outputData []byte
+	var err error
+
+	switch format {
+	case "json":
+		outputData, err = json.MarshalIndent(allCommits, "", "  ")
+	case "yaml":
+		outputData, err = yaml.Marshal(allCommits)
+	default:
+		return fmt.Errorf("unsupported output format: %s. supported formats are: json, yaml", format)
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to marshal output: %v", err)
+	}
+
+	fmt.Println(string(outputData))
+	return nil
+}
 
 // Config holds the configurable options for the application
 type Config struct {
@@ -24,7 +64,7 @@ func loadConfig() (Config, error) {
 		CommitLimit:        -1,
 		RepoPath:           ".",
 		AutoProgress:       true,
-		ProgressIntervalMs: 25, // milliseconds
+		ProgressIntervalMs: 50, // milliseconds
 	}
 
 	configFile, err := os.ReadFile(".visagit.yml")
@@ -56,6 +96,7 @@ func main() {
 	autoProgressFlag := flag.Bool("auto", config.AutoProgress, "Enable automatic progression")
 	progressIntervalFlag := flag.Int("interval", config.ProgressIntervalMs, "Interval for automatic progression in milliseconds")
 	profile := flag.Bool("profile", false, "profile cpu")
+	outputFlag := flag.String("output", "", "Output format for non-interactive mode (json or yaml)")
 	flag.Parse()
 
 	if *profile {
@@ -76,6 +117,13 @@ func main() {
 	// If a positional argument is provided, it overrides repoPathFlag
 	if flag.NArg() > 0 {
 		config.RepoPath = flag.Arg(0)
+	}
+
+	if *outputFlag != "" {
+		if err := runNonInteractive(config, *outputFlag); err != nil {
+			log.Fatalf("Error in non-interactive mode: %v", err)
+		}
+		return
 	}
 
 	// Create a new Bubble Tea model
