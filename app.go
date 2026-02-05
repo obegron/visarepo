@@ -2,11 +2,15 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"math"
+	"os"
 	"os/exec"
+	"runtime"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -75,6 +79,12 @@ type Model struct {
 	displayedStatsYear   int // 0 for All-Time
 	availableStatYears   []int
 	currentStatYearIndex int
+
+	// Report mode progress
+	reportTotal     int
+	reportProcessed int
+	reportWorkers   int
+	reportEngine    string
 }
 
 func (m *Model) SetProgram(p *tea.Program) {
@@ -100,6 +110,12 @@ func InitialModel(cfg Config) Model {
 }
 
 func (m *Model) Init() tea.Cmd {
+	if m.config.ReportMode {
+		if m.config.ReportPreload {
+			return nil
+		}
+		return m.loadAllCommitsCmd()
+	}
 	go m.fetcher()
 	return m.progressTickCmd()
 }
@@ -188,6 +204,458 @@ func (m *Model) fetcher() {
 	}
 
 	cmd.Wait()
+}
+
+type reportLoadedMsg struct {
+	repo         *git.Repository
+	commits      []*commitInfo
+	maxAdditions int
+	maxDeletions int
+	total        int
+	workers      int
+	engine       string
+}
+
+type reportProgressMsg struct {
+	processed int
+	total     int
+	workers   int
+	engine    string
+}
+
+func (m *Model) loadAllCommitsCmd() tea.Cmd {
+	return func() tea.Msg {
+		makeProgress := func(engine string) func(processed, total, workers int) {
+			return func(processed, total, workers int) {
+				if m.program == nil {
+					return
+				}
+				m.program.Send(reportProgressMsg{
+					processed: processed,
+					total:     total,
+					workers:   workers,
+					engine:    engine,
+				})
+			}
+		}
+		engine := "git-par"
+		repo, commits, maxAdditions, maxDeletions, total, workers, err := loadAllCommitsGitParallel(m.config, makeProgress(engine))
+		if err != nil {
+			return errMsg{err}
+		}
+		return reportLoadedMsg{
+			repo:         repo,
+			commits:      commits,
+			maxAdditions: maxAdditions,
+			maxDeletions: maxDeletions,
+			total:        total,
+			workers:      workers,
+			engine:       engine,
+		}
+	}
+}
+
+type commitStats struct {
+	files     int
+	additions int
+	deletions int
+	churn     int
+}
+
+type reportFile struct {
+	Version   int           `json:"version"`
+	RepoPath  string        `json:"repoPath"`
+	UpdatedAt time.Time     `json:"updatedAt"`
+	Commits   []*commitInfo `json:"commits"`
+}
+
+func loadAllCommitsGitParallel(cfg Config, progress func(processed, total, workers int)) (*git.Repository, []*commitInfo, int, int, int, int, error) {
+	r, err := git.PlainOpenWithOptions(cfg.RepoPath, &git.PlainOpenOptions{EnableDotGitCommonDir: true})
+	if err != nil {
+		return nil, nil, 0, 0, 0, 0, fmt.Errorf("failed to open repository: %v", err)
+	}
+
+	commits, err := loadCommitMetadata(cfg)
+	if err != nil {
+		return nil, nil, 0, 0, 0, 0, err
+	}
+	if cfg.ReportSamplePct > 0 {
+		cfg.ReportFilePath = ""
+	}
+
+	var cached []*commitInfo
+	cacheIndex := -1
+	if cfg.ReportFilePath != "" {
+		loaded, lastHash, err := loadReportFile(cfg.ReportFilePath)
+		if err == nil && len(loaded) > 0 {
+			for i := 0; i < len(commits); i++ {
+				if commits[i].Hash == lastHash {
+					cacheIndex = i
+					break
+				}
+			}
+			if cacheIndex >= 0 {
+				cached = loaded
+			}
+		}
+	}
+
+	startIndex := 0
+	if cacheIndex >= 0 && len(cached) > 0 {
+		startIndex = cacheIndex + 1
+	}
+
+	if startIndex > len(commits) {
+		startIndex = len(commits)
+	}
+
+	if len(cached) > 0 {
+		commits = append(append([]*commitInfo{}, cached...), commits[startIndex:]...)
+	} else {
+		commits = commits[startIndex:]
+	}
+
+	total := len(commits) - len(cached)
+	if total <= 0 {
+		return r, commits, maxAdditions(commits), maxDeletions(commits), 0, 0, nil
+	}
+
+	workerCount := cfg.ReportWorkers
+	if workerCount <= 0 {
+		workerCount = runtime.NumCPU() * 2
+	}
+	if workerCount < 1 {
+		workerCount = 1
+	}
+	if workerCount > total {
+		workerCount = total
+	}
+
+	if progress != nil {
+		progress(0, total, workerCount)
+	}
+
+	statsByHash := make(map[string]commitStats, total)
+
+	progressStep := 0
+	if progress != nil && total > 0 {
+		step := total / 200
+		if step < 100 {
+			step = 100
+		}
+		if step > total {
+			step = total
+		}
+		progressStep = step
+	}
+
+	var processed int64
+
+	type workerResult struct {
+		stats map[string]commitStats
+		err   error
+	}
+	results := make(chan workerResult, workerCount)
+
+	chunkSize := (total + workerCount - 1) / workerCount
+	for w := 0; w < workerCount; w++ {
+		start := w * chunkSize
+		if start >= total {
+			break
+		}
+		end := start + chunkSize
+		if end > total {
+			end = total
+		}
+		hashes := make([]string, 0, end-start)
+		for i := start; i < end; i++ {
+			hashes = append(hashes, commits[len(cached)+i].Hash)
+		}
+
+		go func(hs []string) {
+			stats, err := runGitNumstat(cfg.RepoPath, hs, func() {
+				newCount := atomic.AddInt64(&processed, 1)
+				if progress != nil && progressStep > 0 && int(newCount)%progressStep == 0 {
+					progress(int(newCount), total, workerCount)
+				}
+			})
+			results <- workerResult{stats: stats, err: err}
+		}(hashes)
+	}
+
+	for i := 0; i < workerCount && i*chunkSize < total; i++ {
+		res := <-results
+		if res.err != nil {
+			return nil, nil, 0, 0, 0, 0, res.err
+		}
+		for hash, stat := range res.stats {
+			statsByHash[hash] = stat
+		}
+	}
+
+	maxAdditions := 0
+	maxDeletions := 0
+	for i := 0; i < len(commits); i++ {
+		stat, ok := statsByHash[commits[i].Hash]
+		if ok {
+			commits[i].Files = stat.files
+			commits[i].Additions = stat.additions
+			commits[i].Deletions = stat.deletions
+			commits[i].Churn = stat.churn
+		}
+
+		if i > 0 {
+			prev := commits[i-1]
+			commits[i].CumulativeFiles = prev.CumulativeFiles + commits[i].Files
+			commits[i].CumulativeAdditions = prev.CumulativeAdditions + commits[i].Additions
+			commits[i].CumulativeDeletions = prev.CumulativeDeletions + commits[i].Deletions
+		} else {
+			commits[i].CumulativeFiles = commits[i].Files
+			commits[i].CumulativeAdditions = commits[i].Additions
+			commits[i].CumulativeDeletions = commits[i].Deletions
+		}
+
+		if commits[i].Additions > maxAdditions {
+			maxAdditions = commits[i].Additions
+		}
+		if commits[i].Deletions > maxDeletions {
+			maxDeletions = commits[i].Deletions
+		}
+	}
+
+	if progress != nil {
+		progress(total, total, workerCount)
+	}
+
+	if cfg.ReportFilePath != "" && cfg.ReportSamplePct == 0 {
+		_ = saveReportFile(cfg.ReportFilePath, cfg.RepoPath, commits)
+	}
+
+	return r, commits, maxAdditions, maxDeletions, total, workerCount, nil
+}
+
+func maxAdditions(commits []*commitInfo) int {
+	maxVal := 0
+	for _, c := range commits {
+		if c.Additions > maxVal {
+			maxVal = c.Additions
+		}
+	}
+	return maxVal
+}
+
+func maxDeletions(commits []*commitInfo) int {
+	maxVal := 0
+	for _, c := range commits {
+		if c.Deletions > maxVal {
+			maxVal = c.Deletions
+		}
+	}
+	return maxVal
+}
+
+func loadReportFile(path string) ([]*commitInfo, string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", err
+	}
+	var rf reportFile
+	if err := json.Unmarshal(data, &rf); err != nil {
+		return nil, "", err
+	}
+	if len(rf.Commits) == 0 {
+		return nil, "", fmt.Errorf("report file has no commits")
+	}
+	lastHash := rf.Commits[len(rf.Commits)-1].Hash
+	return rf.Commits, lastHash, nil
+}
+
+func saveReportFile(path, repoPath string, commits []*commitInfo) error {
+	rf := reportFile{
+		Version:   1,
+		RepoPath:  repoPath,
+		UpdatedAt: time.Now(),
+		Commits:   commits,
+	}
+	data, err := json.Marshal(rf)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+func loadCommitMetadata(cfg Config) ([]*commitInfo, error) {
+	format := "%H%x1f%an%x1f%ad%x1f%s"
+	args := []string{
+		"-C", cfg.RepoPath,
+		"log",
+		"--reverse",
+		"--date=iso-strict",
+		"--pretty=format:" + format,
+	}
+	if cfg.CommitLimit > 0 {
+		args = append(args, "-n", fmt.Sprintf("%d", cfg.CommitLimit))
+	}
+
+	cmd := exec.Command("git", args...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stdout pipe for git log metadata: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start git log metadata: %v", err)
+	}
+
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
+
+	var commits []*commitInfo
+	for scanner.Scan() {
+		line := scanner.Text()
+		parts := strings.SplitN(line, "\x1f", 4)
+		if len(parts) < 4 {
+			continue
+		}
+		parsedDate, err := time.Parse(time.RFC3339, parts[2])
+		if err != nil {
+			parsedDate = time.Now()
+		}
+		commits = append(commits, &commitInfo{
+			Hash:    parts[0],
+			Author:  parts[1],
+			Date:    parsedDate,
+			Message: parts[3],
+		})
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("git log metadata scan failed: %v", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		return nil, fmt.Errorf("git log metadata failed: %v", err)
+	}
+
+	if cfg.ReportSamplePct > 0 && cfg.ReportSamplePct < 100 && len(commits) > 0 {
+		target := (len(commits) * cfg.ReportSamplePct) / 100
+		if target < 1 {
+			target = 1
+		}
+		if target < len(commits) {
+			commits = commits[:target]
+		}
+	}
+
+	return commits, nil
+}
+
+func runGitNumstat(repoPath string, hashes []string, onCommit func()) (map[string]commitStats, error) {
+	if len(hashes) == 0 {
+		return map[string]commitStats{}, nil
+	}
+	args := []string{
+		"-C", repoPath,
+		"show",
+		"--numstat",
+		"--no-renames",
+		"--no-color",
+		"--no-decorate",
+		"--pretty=format:%H",
+		"--root",
+		"--stdin",
+	}
+	cmd := exec.Command("git", args...)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stdin pipe for git show: %v", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create stdout pipe for git show: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start git show: %v", err)
+	}
+
+	go func() {
+		for _, h := range hashes {
+			fmt.Fprintln(stdin, h)
+		}
+		stdin.Close()
+	}()
+
+	stats := make(map[string]commitStats, len(hashes))
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
+
+	var currentHash string
+	var current commitStats
+
+	emit := func() {
+		if currentHash == "" {
+			return
+		}
+		stats[currentHash] = current
+		currentHash = ""
+		current = commitStats{}
+		if onCommit != nil {
+			onCommit()
+		}
+	}
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			emit()
+			continue
+		}
+		if strings.Contains(line, "\t") {
+			fields := strings.SplitN(line, "\t", 3)
+			if len(fields) < 3 {
+				continue
+			}
+			current.files++
+			add, del := 0, 0
+			if fields[0] != "-" {
+				fmt.Sscanf(fields[0], "%d", &add)
+			}
+			if fields[1] != "-" {
+				fmt.Sscanf(fields[1], "%d", &del)
+			}
+			current.additions += add
+			current.deletions += del
+			current.churn += add + del
+			continue
+		}
+		if isHexHash(line) {
+			emit()
+			currentHash = line
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("git show scan failed: %v", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		return nil, fmt.Errorf("git show failed: %v", err)
+	}
+
+	emit()
+
+	return stats, nil
+}
+
+func isHexHash(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 type progressTickMsg time.Time
@@ -358,41 +826,74 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case progressTickMsg:
 		if m.autoProgress {
-			select {
-			case newCommit, ok := <-m.processedCommitsChan:
-				if ok {
-					// Atomically process the new commit and update the index
-					newCommit.DiffLoaded = true
+			const maxPerTick = 200
+			for i := 0; i < maxPerTick; i++ {
+				select {
+				case newCommit, ok := <-m.processedCommitsChan:
+					if ok {
+						// Atomically process the new commit and update the index
+						newCommit.DiffLoaded = true
 
-					if len(m.commits) > 0 {
-						lastCommit := m.commits[len(m.commits)-1]
-						newCommit.CumulativeFiles = lastCommit.CumulativeFiles + newCommit.Files
-						newCommit.CumulativeAdditions = lastCommit.CumulativeAdditions + newCommit.Additions
-						newCommit.CumulativeDeletions = lastCommit.CumulativeDeletions + newCommit.Deletions
+						if len(m.commits) > 0 {
+							lastCommit := m.commits[len(m.commits)-1]
+							newCommit.CumulativeFiles = lastCommit.CumulativeFiles + newCommit.Files
+							newCommit.CumulativeAdditions = lastCommit.CumulativeAdditions + newCommit.Additions
+							newCommit.CumulativeDeletions = lastCommit.CumulativeDeletions + newCommit.Deletions
+						} else {
+							newCommit.CumulativeFiles = newCommit.Files
+							newCommit.CumulativeAdditions = newCommit.Additions
+							newCommit.CumulativeDeletions = newCommit.Deletions
+						}
+
+						if newCommit.Additions > m.maxAdditions {
+							m.maxAdditions = newCommit.Additions
+						}
+						if newCommit.Deletions > m.maxDeletions {
+							m.maxDeletions = newCommit.Deletions
+						}
+
+						m.commits = append(m.commits, newCommit)
+						m.currentCommitIndex = len(m.commits) - 1
+
 					} else {
-						newCommit.CumulativeFiles = newCommit.Files
-						newCommit.CumulativeAdditions = newCommit.Additions
-						newCommit.CumulativeDeletions = newCommit.Deletions
+						m.loadingComplete = true
+						i = maxPerTick
 					}
-
-					if newCommit.Additions > m.maxAdditions {
-						m.maxAdditions = newCommit.Additions
-					}
-					if newCommit.Deletions > m.maxDeletions {
-						m.maxDeletions = newCommit.Deletions
-					}
-
-					m.commits = append(m.commits, newCommit)
-					m.currentCommitIndex = len(m.commits) - 1
-
-				} else {
-					m.loadingComplete = true
+				default:
+					i = maxPerTick
 				}
-			default:
-				// Channel is empty for now, but not closed.
 			}
 		}
 		return m, m.progressTickCmd()
+
+	case reportLoadedMsg:
+		m.repo = msg.repo
+		m.commits = msg.commits
+		m.maxAdditions = msg.maxAdditions
+		m.maxDeletions = msg.maxDeletions
+		m.reportTotal = msg.total
+		m.reportProcessed = msg.total
+		m.reportWorkers = msg.workers
+		if msg.engine != "" {
+			m.reportEngine = msg.engine
+		}
+		if len(m.commits) > 0 {
+			m.currentCommitIndex = len(m.commits) - 1
+		} else {
+			m.currentCommitIndex = 0
+		}
+		m.loadingComplete = true
+		m.autoProgress = false
+		return m, nil
+
+	case reportProgressMsg:
+		m.reportProcessed = msg.processed
+		m.reportTotal = msg.total
+		m.reportWorkers = msg.workers
+		if msg.engine != "" {
+			m.reportEngine = msg.engine
+		}
+		return m, nil
 
 	case errMsg:
 		return m, tea.Quit
@@ -598,6 +1099,20 @@ func (m *Model) renderDiffView() string {
 }
 
 func (m *Model) View() string {
+	if m.config.ReportMode && !m.loadingComplete {
+		total := m.reportTotal
+		processed := m.reportProcessed
+		workers := m.reportWorkers
+		engine := m.reportEngine
+		if engine == "" {
+			engine = "git-log"
+		}
+		if total <= 0 {
+			return fmt.Sprintf("Loading report... using %d workers (%s)", workers, engine)
+		}
+		percent := (float64(processed) / float64(total)) * 100
+		return fmt.Sprintf("Loading report... %d/%d (%.1f%%) using %d workers (%s)", processed, total, percent, workers, engine)
+	}
 	if m.diffState == inDiffView {
 		return m.renderDiffView()
 	}
