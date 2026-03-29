@@ -9,7 +9,7 @@ import (
 	"runtime/pprof"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	yaml "gopkg.in/yaml.v2"
 )
 
@@ -194,7 +194,7 @@ func main() {
 		}
 
 		m := &model
-		p := tea.NewProgram(m, tea.WithAltScreen())
+		p := tea.NewProgram(m)
 		m.SetProgram(p)
 		if _, err := p.Run(); err != nil {
 			log.Printf("Error running program: %v", err)
@@ -207,7 +207,7 @@ func main() {
 	m := &model
 
 	// Interactive mode with full terminal UI
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m)
 	m.SetProgram(p) // Pass the program reference to the model
 
 	// Run the program

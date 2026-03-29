@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"image/color"
 	"math"
 	"os"
 	"os/exec"
@@ -13,8 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
@@ -715,7 +716,7 @@ func getDiff(r *git.Repository, commit *commitInfo) (string, error) {
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if m.diffState == inDiffView {
 			switch msg.String() {
 			case "q", "ctrl+c", "esc", "enter":
@@ -736,7 +737,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.diffScroll = 0
 				}
 				return m, nil
-			case "pgdown", " ":
+			case "pgdown", "space":
 				m.diffScroll += m.height
 				return m, nil
 			case "left", "h":
@@ -799,7 +800,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.displayedStatsYear = m.availableStatYears[m.currentStatYearIndex]
 				}
 				return m, nil
-			case "p", " ": // Toggle auto-progression
+			case "p", "space": // Toggle auto-progression
 				m.autoProgress = !m.autoProgress
 				return m, nil
 			case "enter":
@@ -920,7 +921,7 @@ var (
 	graphAxisStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
 	graphHighlight = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Bold(true)
 
-	additionGradient = []lipgloss.Color{
+	additionGradient = []color.Color{
 		lipgloss.Color("#E6FFE6"),
 		lipgloss.Color("#CCFFCC"),
 		lipgloss.Color("#B3FFB3"),
@@ -932,7 +933,7 @@ var (
 		lipgloss.Color("#1AFF1A"),
 		lipgloss.Color("#00FF00"), // Stronger green base
 	}
-	deletionGradient = []lipgloss.Color{
+	deletionGradient = []color.Color{
 		lipgloss.Color("#FF0000"), // Stronger red base
 		lipgloss.Color("#FF1A1A"),
 		lipgloss.Color("#FF3333"),
@@ -1098,7 +1099,13 @@ func (m *Model) renderDiffView() string {
 	return builder.String()
 }
 
-func (m *Model) View() string {
+func (m *Model) newView(content string) tea.View {
+	v := tea.NewView(content)
+	v.AltScreen = true
+	return v
+}
+
+func (m *Model) View() tea.View {
 	if m.config.ReportMode && !m.loadingComplete {
 		total := m.reportTotal
 		processed := m.reportProcessed
@@ -1108,16 +1115,16 @@ func (m *Model) View() string {
 			engine = "git-log"
 		}
 		if total <= 0 {
-			return fmt.Sprintf("Loading report... using %d workers (%s)", workers, engine)
+			return m.newView(fmt.Sprintf("Loading report... using %d workers (%s)", workers, engine))
 		}
 		percent := (float64(processed) / float64(total)) * 100
-		return fmt.Sprintf("Loading report... %d/%d (%.1f%%) using %d workers (%s)", processed, total, percent, workers, engine)
+		return m.newView(fmt.Sprintf("Loading report... %d/%d (%.1f%%) using %d workers (%s)", processed, total, percent, workers, engine))
 	}
 	if m.diffState == inDiffView {
-		return m.renderDiffView()
+		return m.newView(m.renderDiffView())
 	}
 	if len(m.commits) == 0 {
-		return "Loading commits..."
+		return m.newView("Loading commits...")
 	}
 
 	if m.currentCommitIndex >= len(m.commits) {
@@ -1169,7 +1176,7 @@ func (m *Model) View() string {
 
 	rightColumn := m.renderPanelWithHeader("Developer Stats", m.renderDeveloperStats(), m.width/2-2, m.height)
 
-	return lipgloss.JoinHorizontal(lipgloss.Top, leftColumn, rightColumn)
+	return m.newView(lipgloss.JoinHorizontal(lipgloss.Top, leftColumn, rightColumn))
 }
 
 func (m *Model) renderTimeline(timelineHeight int) string {
