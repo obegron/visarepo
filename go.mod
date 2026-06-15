@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	charm.land/bubbletea/v2 v2.0.7
-	charm.land/lipgloss/v2 v2.0.3
+	charm.land/lipgloss/v2 v2.0.4
 	github.com/go-git/go-git/v5 v5.19.1
 	gopkg.in/yaml.v2 v2.4.0
 )
