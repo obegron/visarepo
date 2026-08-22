@@ -14,26 +14,17 @@ import (
 )
 
 func runNonInteractive(config Config, format string) error {
-	model := InitialModel(config)
-	go model.fetcher()
-
-	var allCommits []*commitInfo
-	for commit := range model.processedCommitsChan {
-		if len(allCommits) > 0 {
-			lastCommit := allCommits[len(allCommits)-1]
-			commit.CumulativeFiles = lastCommit.CumulativeFiles + commit.Files
-			commit.CumulativeAdditions = lastCommit.CumulativeAdditions + commit.Additions
-			commit.CumulativeDeletions = lastCommit.CumulativeDeletions + commit.Deletions
-		} else {
-			commit.CumulativeFiles = commit.Files
-			commit.CumulativeAdditions = commit.Additions
-			commit.CumulativeDeletions = commit.Deletions
-		}
-		allCommits = append(allCommits, commit)
+	// Use native Git's numstat output instead of constructing every textual
+	// patch in Go. This also lets non-interactive mode return loader errors.
+	config.commitLimitFromStart = true
+	config.ReportFilePath = ""
+	config.ReportSamplePct = 0
+	_, allCommits, _, _, _, _, err := loadAllCommitsGitParallel(config, nil)
+	if err != nil {
+		return err
 	}
 
 	var outputData []byte
-	var err error
 
 	switch format {
 	case "json":
@@ -64,6 +55,10 @@ type Config struct {
 	ReportPreloadExit  bool   `yaml:"reportPreloadExit"`
 	ReportSamplePct    int    `yaml:"reportSamplePct"`
 	ReportFilePath     string `yaml:"reportFile"`
+
+	// Timeline mode has always interpreted -limit as the first N commits.
+	// Report mode retains its existing latest-N behavior.
+	commitLimitFromStart bool
 }
 
 func loadConfig() (Config, error) {
@@ -111,7 +106,7 @@ func main() {
 	profile := flag.Bool("profile", false, "profile cpu")
 	outputFlag := flag.String("output", "", "Output format for non-interactive mode (json or yaml)")
 	reportFlag := flag.Bool("report", config.ReportMode, "Load all data first, then show a final report view")
-	reportWorkersFlag := flag.Int("workers", config.ReportWorkers, "Workers for report mode (0 = auto, >0 = exact)")
+	reportWorkersFlag := flag.Int("workers", config.ReportWorkers, "Workers for Git statistics loading (0 = auto, >0 = exact)")
 	reportPreloadFlag := flag.Bool("report-preload", config.ReportPreload, "Preload report data before starting the TUI")
 	reportPreloadExitFlag := flag.Bool("report-preload-exit", config.ReportPreloadExit, "Exit after preloading the report (skip TUI)")
 	reportSamplePctFlag := flag.Int("report-sample", config.ReportSamplePct, "Report sample percent (0 = full, 1-100)")

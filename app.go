@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -124,87 +125,25 @@ func (m *Model) Init() tea.Cmd {
 func (m *Model) fetcher() {
 	defer close(m.processedCommitsChan)
 
-	r, err := git.PlainOpenWithOptions(m.config.RepoPath, &git.PlainOpenOptions{EnableDotGitCommonDir: true})
+	// Keep full patch generation lazy for the diff viewer, but use native Git's
+	// numstat output for timeline statistics. This avoids constructing every
+	// textual patch in Go and processes independent history ranges in parallel.
+	cfg := m.config
+	cfg.commitLimitFromStart = true
+	cfg.ReportFilePath = ""
+	cfg.ReportSamplePct = 0
+	r, commits, _, _, _, _, err := loadAllCommitsGitParallel(cfg, nil)
 	if err != nil {
 		if m.program != nil {
-			m.program.Send(errMsg{fmt.Errorf("failed to open repository: %v", err)})
+			m.program.Send(errMsg{err})
 		}
 		return
 	}
 	m.repo = r
 
-	cmd := exec.Command("git", "-C", m.config.RepoPath, "rev-list", "--reverse", "HEAD")
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		if m.program != nil {
-			m.program.Send(errMsg{fmt.Errorf("failed to create stdout pipe for git rev-list: %v", err)})
-		}
-		return
+	for _, commit := range commits {
+		m.processedCommitsChan <- commit
 	}
-
-	if err := cmd.Start(); err != nil {
-		if m.program != nil {
-			m.program.Send(errMsg{fmt.Errorf("failed to start git rev-list: %v", err)})
-		}
-		return
-	}
-
-	scanner := bufio.NewScanner(stdout)
-	commitCount := 0
-
-	for scanner.Scan() {
-		hashStr := scanner.Text()
-		hash := plumbing.NewHash(hashStr)
-
-		commit, err := r.CommitObject(hash)
-		if err != nil {
-			continue
-		}
-
-		var filesChanged, additions, deletions, churn int
-		if commit.NumParents() > 0 {
-			parent, err := commit.Parent(0)
-			if err != nil {
-				continue
-			}
-			cTree, err := commit.Tree()
-			if err != nil {
-				continue
-			}
-			pTree, err := parent.Tree()
-			if err != nil {
-				continue
-			}
-			patch, err := pTree.Patch(cTree)
-			if err != nil {
-				continue
-			}
-			stats := patch.Stats()
-			filesChanged = len(stats)
-			for _, s := range stats {
-				additions += s.Addition
-				deletions += s.Deletion
-			}
-			churn = additions + deletions
-		}
-
-		m.processedCommitsChan <- &commitInfo{
-			Hash:      commit.Hash.String(),
-			Message:   commit.Message,
-			Author:    commit.Author.Name,
-			Date:      commit.Author.When,
-			Files:     filesChanged,
-			Additions: additions,
-			Deletions: deletions,
-			Churn:     churn,
-		}
-		commitCount++
-		if m.config.CommitLimit > 0 && commitCount >= m.config.CommitLimit {
-			break
-		}
-	}
-
-	cmd.Wait()
 }
 
 type reportLoadedMsg struct {
@@ -323,7 +262,7 @@ func loadAllCommitsGitParallel(cfg Config, progress func(processed, total, worke
 
 	workerCount := cfg.ReportWorkers
 	if workerCount <= 0 {
-		workerCount = runtime.NumCPU() * 2
+		workerCount = runtime.NumCPU()
 	}
 	if workerCount < 1 {
 		workerCount = 1
@@ -494,7 +433,7 @@ func loadCommitMetadata(cfg Config) ([]*commitInfo, error) {
 		"--date=iso-strict",
 		"--pretty=format:" + format,
 	}
-	if cfg.CommitLimit > 0 {
+	if cfg.CommitLimit > 0 && !cfg.commitLimitFromStart {
 		args = append(args, "-n", fmt.Sprintf("%d", cfg.CommitLimit))
 	}
 
@@ -534,6 +473,9 @@ func loadCommitMetadata(cfg Config) ([]*commitInfo, error) {
 	}
 	if err := cmd.Wait(); err != nil {
 		return nil, fmt.Errorf("git log metadata failed: %v", err)
+	}
+	if cfg.CommitLimit > 0 && cfg.commitLimitFromStart && len(commits) > cfg.CommitLimit {
+		commits = commits[:cfg.CommitLimit]
 	}
 
 	if cfg.ReportSamplePct > 0 && cfg.ReportSamplePct < 100 && len(commits) > 0 {
@@ -617,10 +559,10 @@ func runGitNumstat(repoPath string, hashes []string, onCommit func()) (map[strin
 			current.files++
 			add, del := 0, 0
 			if fields[0] != "-" {
-				fmt.Sscanf(fields[0], "%d", &add)
+				add, _ = strconv.Atoi(fields[0])
 			}
 			if fields[1] != "-" {
-				fmt.Sscanf(fields[1], "%d", &del)
+				del, _ = strconv.Atoi(fields[1])
 			}
 			current.additions += add
 			current.deletions += del
@@ -864,6 +806,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					i = maxPerTick
 				}
 			}
+		}
+		// Once the loader has closed the channel there is no background work
+		// left to poll. Keyboard and window events still trigger redraws, so an
+		// idle timer would only repeat the expensive full-history rendering.
+		if m.loadingComplete {
+			return m, nil
 		}
 		return m, m.progressTickCmd()
 
