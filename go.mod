@@ -1,9 +1,9 @@
 module github.com/obegron/visarepo
 
-go 1.26
+go 1.26.0
 
 require (
-	charm.land/bubbletea/v2 v2.0.9
+	charm.land/bubbletea/v2 v2.0.10
 	charm.land/lipgloss/v2 v2.0.6
 	github.com/go-git/go-git/v5 v5.19.2
 	gopkg.in/yaml.v2 v2.4.0
